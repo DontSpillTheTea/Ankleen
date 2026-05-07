@@ -14,6 +14,7 @@ from aqt.utils import tooltip
 from aqt.qt import (
     QDialog, QVBoxLayout, QDialogButtonBox,
     QTabWidget, QTextBrowser, QPlainTextEdit,
+    QPalette,
 )
 
 
@@ -162,20 +163,51 @@ def _get_note_key(note):
     return note.id if note.id else id(note)
 
 
-def _build_rendered_html(old_fields, new_fields, field_names):
+def _preview_colors(widget):
+    """Extract theme-aware CSS colors from the current Qt palette."""
+    pal = widget.palette()
+    return {
+        "bg":     pal.color(QPalette.ColorRole.Base).name(),
+        "alt_bg": pal.color(QPalette.ColorRole.AlternateBase).name(),
+        "text":   pal.color(QPalette.ColorRole.Text).name(),
+        "border": pal.color(QPalette.ColorRole.Mid).name(),
+        "window": pal.color(QPalette.ColorRole.Window).name(),
+    }
+
+
+def _build_rendered_html(old_fields, new_fields, field_names, colors):
     """Build readable before/after HTML for the Rendered Preview tab."""
-    parts = []
-    border = "border: 1px solid #ccc; border-radius: 4px; padding: 8px; margin-bottom: 4px;"
+    bg     = colors["bg"]
+    alt_bg = colors["alt_bg"]
+    text   = colors["text"]
+    border = colors["border"]
+    window = colors["window"]
+
+    box_base = (
+        f"color:{text}; border:1px solid {border}; border-radius:4px;"
+        f"padding:8px; margin-bottom:6px;"
+    )
+    head = (
+        f"<html><head><style>"
+        f"body {{ background:{window}; color:{text}; font-family:sans-serif; }}"
+        f".before {{ {box_base} background:{bg}; border-left:4px solid {border}; }}"
+        f".after  {{ {box_base} background:{alt_bg}; border-left:4px solid {text}; }}"
+        f".label  {{ color:{text}; font-weight:bold; margin:4px 0 2px; }}"
+        f"</style></head><body>"
+    )
+
+    parts = [head]
     for name, old, new in zip(field_names, old_fields, new_fields):
         if old == new:
             continue
         safe_name = html.escape(name)
-        parts.append(f"<h3 style='margin-bottom:2px'>{safe_name}</h3>")
-        parts.append(f"<p style='margin:2px 0'><b>Before</b></p>")
-        parts.append(f"<div style='{border} background:#fff5f5'>{old}</div>")
-        parts.append(f"<p style='margin:2px 0'><b>After</b></p>")
-        parts.append(f"<div style='{border} background:#f5fff5'>{new}</div>")
+        parts.append(f"<h3 style='color:{text};margin-bottom:2px'>{safe_name}</h3>")
+        parts.append(f"<p class='label'>Before</p>")
+        parts.append(f"<div class='before'>{old}</div>")
+        parts.append(f"<p class='label'>After</p>")
+        parts.append(f"<div class='after'>{new}</div>")
         parts.append("<hr>")
+    parts.append("</body></html>")
     return "".join(parts)
 
 
@@ -216,10 +248,11 @@ class PreviewDialog(QDialog):
         tabs = QTabWidget(self)
 
         # --- Tab 1: Rendered Preview ---
+        colors = _preview_colors(self)
         rendered = QTextBrowser(self)
         rendered.setReadOnly(True)
         rendered.setOpenLinks(False)
-        rendered.setHtml(_build_rendered_html(old_fields, new_fields, field_names))
+        rendered.setHtml(_build_rendered_html(old_fields, new_fields, field_names, colors))
         tabs.addTab(rendered, "Rendered Preview")
 
         # --- Tab 2: Source Diff ---
