@@ -6,11 +6,15 @@ and clean up AI-generated Markdown formatting.
 
 import re
 import html
+import difflib
 
 from aqt import gui_hooks
 from aqt.editor import Editor
 from aqt.utils import tooltip
-from aqt.qt import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
+from aqt.qt import (
+    QDialog, QVBoxLayout, QDialogButtonBox,
+    QTabWidget, QTextBrowser, QPlainTextEdit,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -36,8 +40,15 @@ _INLINE_MATH = re.compile(
 )
 
 SAFE_TAGS = {
-    'b', 'strong', 'i', 'em', 'u', 's', 'del', 'code', 'br', 'div', 'span', 'p', 
-    'ul', 'ol', 'li', 'sub', 'sup', 'img', 'a', 'font', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'style', 'script', 'anki-mathjax', 'hr'
+    'b', 'strong', 'i', 'em', 'u', 's', 'del', 'code',
+    'br', 'div', 'span', 'p',
+    'ul', 'ol', 'li',
+    'sub', 'sup',
+    'img', 'a',
+    'font',
+    'table', 'tr', 'td', 'th', 'tbody', 'thead',
+    'anki-mathjax', 'hr',
+    # NOTE: 'script' and 'style' intentionally excluded.
 }
 
 # Markdown regexes for text nodes
@@ -151,29 +162,77 @@ def _get_note_key(note):
     return note.id if note.id else id(note)
 
 
+def _build_rendered_html(old_fields, new_fields, field_names):
+    """Build readable before/after HTML for the Rendered Preview tab."""
+    parts = []
+    border = "border: 1px solid #ccc; border-radius: 4px; padding: 8px; margin-bottom: 4px;"
+    for name, old, new in zip(field_names, old_fields, new_fields):
+        if old == new:
+            continue
+        safe_name = html.escape(name)
+        parts.append(f"<h3 style='margin-bottom:2px'>{safe_name}</h3>")
+        parts.append(f"<p style='margin:2px 0'><b>Before</b></p>")
+        parts.append(f"<div style='{border} background:#fff5f5'>{old}</div>")
+        parts.append(f"<p style='margin:2px 0'><b>After</b></p>")
+        parts.append(f"<div style='{border} background:#f5fff5'>{new}</div>")
+        parts.append("<hr>")
+    return "".join(parts)
+
+
+def _build_source_diff(old_fields, new_fields, field_names):
+    """Build a unified diff string for the Source Diff tab."""
+    def pretty(field_html):
+        # Make one-liner HTML more readable by adding newlines at block boundaries
+        s = field_html
+        s = re.sub(r'<br\s*/?><br\s*/?>', '<br><br>\n', s, flags=re.IGNORECASE)
+        s = re.sub(r'</div>', '</div>\n', s, flags=re.IGNORECASE)
+        return s
+
+    chunks = []
+    for name, old, new in zip(field_names, old_fields, new_fields):
+        if old == new:
+            continue
+        old_lines = pretty(old).splitlines(keepends=True)
+        new_lines = pretty(new).splitlines(keepends=True)
+        chunks.append(f"===== Field: {name} =====\n")
+        chunks.extend(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile=f"{name} (before)",
+            tofile=f"{name} (after)",
+            lineterm="",
+        ))
+        chunks.append("\n")
+    return "".join(chunks)
+
+
 class PreviewDialog(QDialog):
     def __init__(self, parent, old_fields, new_fields, field_names):
         super().__init__(parent)
         self.setWindowTitle("Preview Formatting Changes")
-        self.resize(600, 500)
-        
+        self.resize(680, 560)
+
         layout = QVBoxLayout(self)
-        
-        self.text = QTextEdit(self)
-        self.text.setReadOnly(True)
-        
-        html_out = []
-        for name, old, new in zip(field_names, old_fields, new_fields):
-            if old != new:
-                safe_old = html.escape(old)
-                safe_new = html.escape(new)
-                html_out.append(f"<h3>Field: {name}</h3>")
-                html_out.append(f"<b>Before:</b><br><pre style='background-color: #ffe6e6; padding: 5px; color: black; white-space: pre-wrap;'>{safe_old}</pre>")
-                html_out.append(f"<b>After:</b><br><pre style='background-color: #e6ffe6; padding: 5px; color: black; white-space: pre-wrap;'>{safe_new}</pre><hr>")
-                
-        self.text.setHtml("".join(html_out))
-        layout.addWidget(self.text)
-        
+
+        tabs = QTabWidget(self)
+
+        # --- Tab 1: Rendered Preview ---
+        rendered = QTextBrowser(self)
+        rendered.setReadOnly(True)
+        rendered.setOpenLinks(False)
+        rendered.setHtml(_build_rendered_html(old_fields, new_fields, field_names))
+        tabs.addTab(rendered, "Rendered Preview")
+
+        # --- Tab 2: Source Diff ---
+        source = QPlainTextEdit(self)
+        source.setReadOnly(True)
+        source.setPlainText(_build_source_diff(old_fields, new_fields, field_names))
+        font = source.font()
+        font.setFamily("Courier New")
+        source.setFont(font)
+        tabs.addTab(source, "Source Diff")
+
+        layout.addWidget(tabs)
+
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         ok_btn = box.button(QDialogButtonBox.StandardButton.Ok)
         if ok_btn:
