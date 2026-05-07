@@ -268,3 +268,59 @@ if failures:
     sys.exit(1)
 else:
     print(f"All {len(cases)} tests passed.")
+
+
+# ---------------------------------------------------------------------------
+# Test Code Block Field DOM simulation
+# ---------------------------------------------------------------------------
+def simulate_code_block_field(html_input: str) -> str:
+    """Python simulation of the JS textFromNode logic used in convert_field_to_code_block."""
+    # Strip the outer <code> tags for this simulation
+    inner = re.sub(r'^<code>(.*)</code>$', r'\1', html_input, flags=re.DOTALL)
+    
+    # Simulate textFromNode: br -> \n, strip other tags
+    text = inner.replace('<br>', '\n').replace('<br/>', '\n')
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    # JS: text = text.replace(/\u00a0/g, " ");
+    text = text.replace('&nbsp;', ' ').replace('\u00a0', ' ')
+    
+    # JS: unescape HTML entities since textContent naturally decodes them
+    text = html.unescape(text)
+    
+    # Trim outer newlines
+    text = text.strip('\n')
+    
+    # Re-escape using textContent rules (what setting textContent and then reading outerHTML does)
+    escaped = html.escape(text, quote=False)
+    
+    open_html = (
+        '<pre style="text-align:left; white-space:pre-wrap; overflow-x:auto; margin:1em auto; max-width:95%;">'
+        '<code style="display:block; font-family:monospace; white-space:pre-wrap;">'
+    )
+    close_html = '</code></pre>'
+    return open_html + escaped + close_html
+
+cb_input = "<code>void countDown(int n) {<br>&nbsp;&nbsp;&nbsp;&nbsp;if (n &lt;= 0) {<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return;<br>&nbsp;&nbsp;&nbsp;&nbsp;}<br>&nbsp;&nbsp;&nbsp;&nbsp;cout &lt;&lt; n &lt;&lt; endl;<br>&nbsp;&nbsp;&nbsp;&nbsp;countDown(n - 1);<br>}</code>"
+cb_expected = (
+    '<pre style="text-align:left; white-space:pre-wrap; overflow-x:auto; margin:1em auto; max-width:95%;">'
+    '<code style="display:block; font-family:monospace; white-space:pre-wrap;">'
+    'void countDown(int n) {\n'
+    '    if (n &lt;= 0) {\n'
+    '        return;\n'
+    '    }\n'
+    '    cout &lt;&lt; n &lt;&lt; endl;\n'
+    '    countDown(n - 1);\n'
+    '}</code></pre>'
+)
+
+print("\n--- Code Block Field Test ---")
+cb_got = simulate_code_block_field(cb_input)
+if cb_got == cb_expected:
+    print(f"[{PASS}] Code Block Field simulation")
+else:
+    print(f"[{FAIL}] Code Block Field simulation")
+    print(f"       INPUT:    {cb_input!r}")
+    print(f"       EXPECTED: {cb_expected!r}")
+    print(f"       GOT:      {cb_got!r}")
+    sys.exit(1)

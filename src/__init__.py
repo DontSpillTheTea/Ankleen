@@ -7,6 +7,7 @@ and clean up AI-generated Markdown formatting.
 import re
 import html
 import difflib
+import json
 
 from aqt import gui_hooks
 from aqt.editor import Editor
@@ -423,8 +424,178 @@ def undo_last_fix(editor: Editor) -> None:
     editor.saveNow(process_undo)
 
 
+def convert_field_to_code_block(editor: Editor) -> None:
+    js = r"""
+    (function() {
+        try {
+            const active = document.activeElement;
+
+            if (!active || active.tagName !== "TEXTAREA") {
+                return JSON.stringify({
+                    ok: false,
+                    changed: false,
+                    reason: "ACTIVE_NOT_TEXTAREA",
+                    activeElement: active ? active.tagName : "null"
+                });
+            }
+
+            const before = active.value;
+            const start = active.selectionStart ?? 0;
+            const end = active.selectionEnd ?? 0;
+
+            function stripOuterCode(s) {
+                const trimmed = s.trim();
+                const m = trimmed.match(/^<code[^>]*>([\s\S]*)<\/code>$/i);
+                return m ? m[1] : s;
+            }
+
+            function htmlToCodeText(s) {
+                s = stripOuterCode(s);
+                s = s.replace(/<br\s*\/?>/gi, "\n");
+                s = s.replace(/&nbsp;/gi, " ");
+
+                const div = document.createElement("div");
+                div.innerHTML = s;
+
+                let text = div.textContent || "";
+                text = text.replace(/\u00a0/g, " ");
+                text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+                text = text.replace(/^\n+/, "").replace(/\n+$/, "");
+                return text;
+            }
+
+            function escapeHtml(s) {
+                return s
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;");
+            }
+
+            function makeBlock(s) {
+                if (/^\s*<pre[\s>]/i.test(s)) {
+                    return null;
+                }
+
+                const text = htmlToCodeText(s);
+                if (!text.trim()) {
+                    return null;
+                }
+
+                return '<pre style="text-align:left; white-space:pre-wrap; overflow-x:auto; margin:1em auto; max-width:95%;"><code style="display:block; font-family:monospace; white-space:pre-wrap;">'
+                    + escapeHtml(text)
+                    + '</code></pre>';
+            }
+
+            let source;
+            let replaceStart;
+            let replaceEnd;
+
+            if (start !== end) {
+                source = before.slice(start, end);
+                replaceStart = start;
+                replaceEnd = end;
+            } else {
+                source = before;
+                replaceStart = 0;
+                replaceEnd = before.length;
+            }
+
+            const block = makeBlock(source);
+
+            if (!block) {
+                return JSON.stringify({
+                    ok: false,
+                    changed: false,
+                    reason: /^\s*<pre[\s>]/i.test(source) ? "ALREADY_PRE" : "NO_CODE_TEXT",
+                    mode: "TEXTAREA",
+                    selectionLength: end - start
+                });
+            }
+
+            const after = before.slice(0, replaceStart) + block + before.slice(replaceEnd);
+            active.value = after;
+
+            active.dispatchEvent(new Event("input", { bubbles: true }));
+            active.dispatchEvent(new Event("change", { bubbles: true }));
+
+            const changed = before !== active.value;
+
+            return JSON.stringify({
+                ok: true,
+                changed: changed,
+                reason: changed ? "CHANGED" : "UNCHANGED",
+                mode: "TEXTAREA",
+                selectionLength: end - start,
+                beforeSnippet: before.slice(0, 300),
+                afterSnippet: active.value.slice(0, 300)
+            });
+        } catch (err) {
+            return JSON.stringify({
+                ok: false,
+                changed: false,
+                reason: "ERROR: " + err.message
+            });
+        }
+    })();
+    """
+
+    def on_done(result_str):
+        if not result_str:
+            tooltip("Code Block Field failed: No response.")
+            return
+            
+        try:
+            res = json.loads(result_str)
+            if res.get("changed"):
+                tooltip("Converted to code block.")
+                editor.saveNow(lambda: None)
+            else:
+                reason = res.get("reason", "UNKNOWN")
+                tooltip(f"Code Block Field did not change anything. Reason: {reason}")
+        except Exception as e:
+            tooltip(f"Error parsing result: {e}")
+
+    editor.web.evalWithCallback(js, on_done)
+
+
+def debug_code_block(editor: Editor) -> None:
+    js = r"""
+    (function() {
+        try {
+            const active = document.activeElement;
+            const isTextarea = active && active.tagName === "TEXTAREA";
+            
+            return JSON.stringify({
+                activeElement: active ? active.tagName + (active.id ? "#" + active.id : "") : "null",
+                isTextarea: isTextarea,
+                selectionStart: isTextarea ? active.selectionStart : null,
+                selectionEnd: isTextarea ? active.selectionEnd : null,
+                selectionLength: isTextarea ? (active.selectionEnd - active.selectionStart) : 0,
+                activeElementSnippet: isTextarea ? active.value.substring(0, 300) : "",
+                wrapType: typeof wrap,
+                editablesCount: document.querySelectorAll("[contenteditable]").length
+            });
+        } catch(e) {
+            return JSON.stringify({ error: e.message });
+        }
+    })();
+    """
+
+    def on_done(result_str):
+        from aqt.utils import showInfo
+        try:
+            res = json.loads(result_str)
+            info = "\n".join(f"{k}: {v}" for k, v in res.items())
+            showInfo("Code Block Diagnostics:\n\n" + info)
+        except Exception as e:
+            showInfo(f"Error: {e}\n\nRaw: {result_str}")
+
+    editor.web.evalWithCallback(js, on_done)
+
+
 def setup_editor_buttons(buttons: list, editor: Editor) -> None:
     """Add buttons to the Anki editor toolbar."""
+    
     btn_fix = editor.addButton(
         icon=None,
         cmd="fix_formatting",
@@ -434,6 +605,26 @@ def setup_editor_buttons(buttons: list, editor: Editor) -> None:
         label="Fix Formatting"
     )
     buttons.append(btn_fix)
+    
+    btn_code_block = editor.addButton(
+        icon=None,
+        cmd="code_block_field",
+        func=convert_field_to_code_block,
+        tip="Convert field containing <code>...</code> to <pre><code> block",
+        keys="",
+        label="Code Block Field"
+    )
+    buttons.append(btn_code_block)
+    
+    btn_debug = editor.addButton(
+        icon=None,
+        cmd="code_block_debug",
+        func=debug_code_block,
+        tip="Diagnostic tool for Code Block Field",
+        keys="",
+        label="Code Block Debug"
+    )
+    buttons.append(btn_debug)
     
     btn_undo = editor.addButton(
         icon=None,
