@@ -82,11 +82,54 @@ def process_math_content(content: str) -> tuple[str, bool]:
         
     return text, True
 
+# ---------------------------------------------------------------------------
+# Code span sentinels — private-use Unicode; virtually impossible in real notes
+# ---------------------------------------------------------------------------
+
+_CODE_PREFIX = "\uE000ANKLEEN_CODE_"
+_CODE_SUFFIX = "_\uE001"
+
+
+def _code_token(index: int) -> str:
+    return f"{_CODE_PREFIX}{index}{_CODE_SUFFIX}"
+
+
+def _protect_code_spans(text: str) -> tuple[str, list[str]]:
+    """Replace all `...` spans with sentinel tokens. Content is HTML-escaped idempotently."""
+    code_spans: list[str] = []
+
+    def repl(m):
+        # unescape first so we never double-escape existing &lt; etc.
+        raw = html.unescape(m.group(1))
+        escaped = html.escape(raw, quote=False)
+        tok = _code_token(len(code_spans))
+        code_spans.append(f"<code>{escaped}</code>")
+        return tok
+
+    protected = re.sub(r"`([^`\n]+?)`", repl, text)
+    return protected, code_spans
+
+
+def _restore_code_spans(text: str, code_spans: list[str]) -> str:
+    """Substitute sentinel tokens back with their <code>...</code> HTML."""
+    for i, span_html in enumerate(code_spans):
+        text = text.replace(_code_token(i), span_html)
+    return text
+
 
 def fix_formatting(html_field: str) -> str:
     """Convert $/$$ delimiters and safely process Markdown and HTML."""
     text = html_field
-    
+
+    # --- 0. Protect inline code FIRST ---
+    # Must happen before math, tag stripping, or any other regex.
+    # Code content can contain $, <T>, _, ^, &, | — all of which
+    # would be mangled by later passes if not protected.
+    #
+    # Also repair the browser artifact <tag>`</tag> -> ` before extracting.
+    text = re.sub(r'<([a-zA-Z0-9_]+)>`</\1>', r'`', text)
+    text, code_spans = _protect_code_spans(text)
+
     # --- 1. Math Delimiters ---
     def repl_display(m):
         new_content, is_simple = process_math_content(m.group(1))
@@ -98,58 +141,39 @@ def fix_formatting(html_field: str) -> str:
 
     text = _DISPLAY_MATH.sub(repl_display, text)
     text = _INLINE_MATH.sub(repl_inline, text)
-    
-    # --- 2. Inline Code & HTML Protection ---
-    # Specifically repair trailing unknown tags right after backticks (e.g. <type>`)
-    text = re.sub(r'<([a-zA-Z0-9_]+)>`</\1>', r'`', text)
-    
-    code_spans = []
-    
-    def repl_code(m):
-        raw_text = html.unescape(m.group(1))
-        escaped_text = html.escape(raw_text)
-        token = f"__CODE_SPAN_{len(code_spans)}__"
-        code_spans.append(f"<code>{escaped_text}</code>")
-        return token
 
-    # Process all backtick blocks
-    text = re.sub(r'`([^`]+?)`', repl_code, text)
-    
-    # --- 3. Strip Unknown Artifact Tags ---
+    # --- 2. Strip Unknown Artifact Tags ---
     def repl_tag(m):
         full_tag = m.group(0)
         tag_name = m.group(1).lower()
         if tag_name in SAFE_TAGS:
             return full_tag
         return ""
-        
+
     text = re.sub(r'</?([a-zA-Z0-9\-]+)[^>]*>', repl_tag, text)
-    
-    # --- 4. Markdown Processing on Text Nodes Only ---
+
+    # --- 3. Markdown on Text Nodes Only ---
     tokens = re.split(r'(<[^>]+>)', text)
     for i in range(len(tokens)):
         if tokens[i].startswith('<') and tokens[i].endswith('>'):
-            continue # Skip HTML tags
-            
+            continue  # skip HTML tags
         t = tokens[i]
         t = _MD_BOLD1.sub(r'<b>\1</b>', t)
         t = _MD_BOLD2.sub(r'\1<b>\2</b>\3', t)
         t = _MD_STRIKE1.sub(r'<s>\1</s>', t)
         t = _MD_STRIKE2.sub(r'<s>\1</s>', t)
         tokens[i] = t
-        
     text = "".join(tokens)
-    
-    # Normalize spacing to improve readability
+
+    # --- 4. Normalize Spacing ---
     text = re.sub(r'(?:<br\s*/?>|\n|\r)+', '<br><br>', text, flags=re.IGNORECASE)
     text = re.sub(r'^(?:<br\s*/?>)+', '', text, flags=re.IGNORECASE)
     text = re.sub(r'(?:<br\s*/?>)+$', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</div>\s*<div>', '</div><br><br><div>', text, flags=re.IGNORECASE)
-    
-    # --- 5. Restore Protected Code Spans ---
-    for i, span_html in enumerate(code_spans):
-        text = text.replace(f"__CODE_SPAN_{i}__", span_html)
-    
+
+    # --- 5. Restore Protected Code Spans (always last) ---
+    text = _restore_code_spans(text, code_spans)
+
     return text
 
 

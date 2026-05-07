@@ -19,12 +19,36 @@ _INLINE_MATH = re.compile(
 SAFE_TAGS = {
     'b', 'strong', 'i', 'em', 'u', 's', 'del', 'code', 'br', 'div', 'span',
     'p', 'ul', 'ol', 'li', 'sub', 'sup', 'img', 'a', 'font', 'table', 'tr',
-    'td', 'th', 'tbody', 'thead', 'style', 'script', 'anki-mathjax', 'hr',
+    'td', 'th', 'tbody', 'thead', 'anki-mathjax', 'hr',
+    # 'script' and 'style' intentionally excluded
 }
 _MD_BOLD1   = re.compile(r'\*\*([^*]+?)\*\*')
 _MD_BOLD2   = re.compile(r'(^|[\s\W])__(?![a-zA-Z0-9]+__)([^_]+?)__([\s\W]|$)')
 _MD_STRIKE1 = re.compile(r'~~([^~]+?)~~')
 _MD_STRIKE2 = re.compile(r'(?<!~)~([^~]+?)~(?!=~)')
+
+# Sentinel tokens — private-use Unicode, virtually impossible in real notes
+_CODE_PREFIX = "\uE000ANKLEEN_CODE_"
+_CODE_SUFFIX = "_\uE001"
+
+def _code_token(i):
+    return f"{_CODE_PREFIX}{i}{_CODE_SUFFIX}"
+
+def _protect_code_spans(text):
+    code_spans = []
+    def repl(m):
+        raw = html.unescape(m.group(1))
+        esc = html.escape(raw, quote=False)
+        tok = _code_token(len(code_spans))
+        code_spans.append(f"<code>{esc}</code>")
+        return tok
+    protected = re.sub(r"`([^`\n]+?)`", repl, text)
+    return protected, code_spans
+
+def _restore_code_spans(text, code_spans):
+    for i, span in enumerate(code_spans):
+        text = text.replace(_code_token(i), span)
+    return text
 
 
 def process_math_content(content):
@@ -43,34 +67,27 @@ def process_math_content(content):
 def fix_formatting(html_field):
     text = html_field
 
+    # --- 0. Protect inline code FIRST ---
+    text = re.sub(r'<([a-zA-Z0-9_]+)>`</\1>', r'`', text)
+    text, code_spans = _protect_code_spans(text)
+
+    # --- 1. Math ---
     def repl_display(m):
         c, ok = process_math_content(m.group(1))
         return c if ok else f'\\[{m.group(1)}\\]'
-
     def repl_inline(m):
         c, ok = process_math_content(m.group(1))
         return c if ok else f'\\({m.group(1)}\\)'
-
     text = _DISPLAY_MATH.sub(repl_display, text)
     text = _INLINE_MATH.sub(repl_inline, text)
 
-    # Repair artifact: <tag>`</tag>  ->  `
-    text = re.sub(r'<([a-zA-Z0-9_]+)>`</\1>', r'`', text)
-
-    code_spans = []
-    def repl_code(m):
-        raw  = html.unescape(m.group(1))
-        esc  = html.escape(raw)
-        tok  = f'__CODE_SPAN_{len(code_spans)}__'
-        code_spans.append(f'<code>{esc}</code>')
-        return tok
-    text = re.sub(r'`([^`]+?)`', repl_code, text)
-
+    # --- 2. Strip unknown tags ---
     def repl_tag(m):
         name = m.group(1).lower()
         return m.group(0) if name in SAFE_TAGS else ''
     text = re.sub(r'</?([a-zA-Z0-9\-]+)[^>]*>', repl_tag, text)
 
+    # --- 3. Markdown on text nodes only ---
     tokens = re.split(r'(<[^>]+>)', text)
     for i, tok in enumerate(tokens):
         if tok.startswith('<') and tok.endswith('>'):
@@ -82,14 +99,14 @@ def fix_formatting(html_field):
         tokens[i] = t
     text = ''.join(tokens)
 
+    # --- 4. Normalize spacing ---
     text = re.sub(r'(?:<br\s*/?>|\n|\r)+', '<br><br>', text, flags=re.IGNORECASE)
     text = re.sub(r'^(?:<br\s*/?>)+', '', text, flags=re.IGNORECASE)
     text = re.sub(r'(?:<br\s*/?>)+$', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</div>\s*<div>', '</div><br><br><div>', text, flags=re.IGNORECASE)
 
-    for i, span in enumerate(code_spans):
-        text = text.replace(f'__CODE_SPAN_{i}__', span)
-
+    # --- 5. Restore code spans (always last) ---
+    text = _restore_code_spans(text, code_spans)
     return text
 
 
@@ -108,12 +125,12 @@ cases = [
         "<code>set.seed()</code>",
     ),
     (
-        "backtick with raw angle brackets",
+        "backtick with raw angle brackets (old case)",
         "`static_cast<type>(expression)`",
         "<code>static_cast&lt;type&gt;(expression)</code>",
     ),
     (
-        "backtick with pre-escaped entities",
+        "backtick with pre-escaped entities (idempotent)",
         "`static_cast&lt;type&gt;(expression)`",
         "<code>static_cast&lt;type&gt;(expression)</code>",
     ),
@@ -175,6 +192,32 @@ cases = [
         "<div>Style:&nbsp;<div>"
         "<code>static_cast&lt;type&gt;(expression)</code>"
         "</div></div>",
+    ),
+    # --- New C++ template tests ---
+    (
+        "C++: static_cast<double> in code span",
+        "Fix: Cast one to double: `static_cast<double>(count) / total`.",
+        "Fix: Cast one to double: <code>static_cast&lt;double&gt;(count) / total</code>.",
+    ),
+    (
+        "C++: vector<int> in code span",
+        "Use `vector<int>` here.",
+        "Use <code>vector&lt;int&gt;</code> here.",
+    ),
+    (
+        "C++: comparison operators (& becomes &amp;, < becomes &lt;, > stays >)",
+        "Use `x < y && y > z`.",
+        "Use <code>x &lt; y &amp;&amp; y &gt; z</code>.",
+    ),
+    (
+        "C++: pre-escaped entities idempotent",
+        "Use `static_cast&lt;double&gt;(count)`.",
+        "Use <code>static_cast&lt;double&gt;(count)</code>.",
+    ),
+    (
+        "C++: already wrapped in <code> is untouched",
+        "Already <code>static_cast&lt;double&gt;(count)</code>.",
+        "Already <code>static_cast&lt;double&gt;(count)</code>.",
     ),
 ]
 
