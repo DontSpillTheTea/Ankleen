@@ -5,6 +5,7 @@ and clean up AI-generated Markdown formatting.
 """
 
 import re
+import html
 
 from aqt import gui_hooks
 from aqt.editor import Editor
@@ -34,12 +35,16 @@ _INLINE_MATH = re.compile(
     r'(?!\$)'             # not followed by $
 )
 
-# Markdown regexes
-_MD_CODE = re.compile(r'`([^`<>]+?)`')
-_MD_BOLD1 = re.compile(r'\*\*([^*<>]+?)\*\*')
-_MD_BOLD2 = re.compile(r'(^|[\s\W])__(?![a-zA-Z0-9]+__)([^_<>]+?)__([\s\W]|$)')
-_MD_STRIKE1 = re.compile(r'~~([^~<>]+?)~~')
-_MD_STRIKE2 = re.compile(r'(?<!~)~([^~<>]+?)~(?!=~)')
+SAFE_TAGS = {
+    'b', 'strong', 'i', 'em', 'u', 's', 'del', 'code', 'br', 'div', 'span', 'p', 
+    'ul', 'ol', 'li', 'sub', 'sup', 'img', 'a', 'font', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'style', 'script', 'anki-mathjax', 'hr'
+}
+
+# Markdown regexes for text nodes
+_MD_BOLD1 = re.compile(r'\*\*([^*]+?)\*\*')
+_MD_BOLD2 = re.compile(r'(^|[\s\W])__(?![a-zA-Z0-9]+__)([^_]+?)__([\s\W]|$)')
+_MD_STRIKE1 = re.compile(r'~~([^~]+?)~~')
+_MD_STRIKE2 = re.compile(r'(?<!~)~([^~]+?)~(?!=~)')
 
 
 def process_math_content(content: str) -> tuple[str, bool]:
@@ -53,13 +58,13 @@ def process_math_content(content: str) -> tuple[str, bool]:
     # 1. Simple replacements for set theory & probability
     text = text.replace(r'\cup', '∪')
     text = text.replace(r'\cap', '∩')
-    text = text.replace(r'\mid', '|')
+    text = text.replace(r' \mid ', '|')   # space-padded: P(A \mid B) -> P(A|B)
+    text = text.replace(r'\mid', '|')     # unpadded fallback
     
     # 2. Fractions: \frac{A}{B} -> A / B
     text = re.sub(r'\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}', r'\1 / \2', text)
     
     # 3. Check for remaining LaTeX macros or complex structures
-    # If there are backslashes, underscores, carets, or braces left, we consider it complex
     if any(c in text for c in ('\\', '_', '^', '{', '}')):
         return original, False
         
@@ -67,7 +72,10 @@ def process_math_content(content: str) -> tuple[str, bool]:
 
 
 def fix_formatting(html_field: str) -> str:
-    """Convert $/$$ delimiters and Markdown formatting."""
+    """Convert $/$$ delimiters and safely process Markdown and HTML."""
+    text = html_field
+    
+    # --- 1. Math Delimiters ---
     def repl_display(m):
         new_content, is_simple = process_math_content(m.group(1))
         return new_content if is_simple else f'\\[{m.group(1)}\\]'
@@ -76,23 +84,59 @@ def fix_formatting(html_field: str) -> str:
         new_content, is_simple = process_math_content(m.group(1))
         return new_content if is_simple else f'\\({m.group(1)}\\)'
 
-    text = html_field
     text = _DISPLAY_MATH.sub(repl_display, text)
     text = _INLINE_MATH.sub(repl_inline, text)
     
-    # Markdown
-    text = _MD_CODE.sub(r'<code>\1</code>', text)
-    text = _MD_BOLD1.sub(r'<b>\1</b>', text)
-    text = _MD_BOLD2.sub(r'\1<b>\2</b>\3', text)
-    text = _MD_STRIKE1.sub(r'<s>\1</s>', text)
-    text = _MD_STRIKE2.sub(r'<s>\1</s>', text)
+    # --- 2. Inline Code & HTML Protection ---
+    # Specifically repair trailing unknown tags right after backticks (e.g. <type>`)
+    text = re.sub(r'<([a-zA-Z0-9_]+)>`</\1>', r'`', text)
     
-    # Normalize spacing to improve readability (prevent clumping)
-    # Matches any sequence of HTML <br> tags OR literal unshown newlines (\n, \r)
+    code_spans = []
+    
+    def repl_code(m):
+        raw_text = html.unescape(m.group(1))
+        escaped_text = html.escape(raw_text)
+        token = f"__CODE_SPAN_{len(code_spans)}__"
+        code_spans.append(f"<code>{escaped_text}</code>")
+        return token
+
+    # Process all backtick blocks
+    text = re.sub(r'`([^`]+?)`', repl_code, text)
+    
+    # --- 3. Strip Unknown Artifact Tags ---
+    def repl_tag(m):
+        full_tag = m.group(0)
+        tag_name = m.group(1).lower()
+        if tag_name in SAFE_TAGS:
+            return full_tag
+        return ""
+        
+    text = re.sub(r'</?([a-zA-Z0-9\-]+)[^>]*>', repl_tag, text)
+    
+    # --- 4. Markdown Processing on Text Nodes Only ---
+    tokens = re.split(r'(<[^>]+>)', text)
+    for i in range(len(tokens)):
+        if tokens[i].startswith('<') and tokens[i].endswith('>'):
+            continue # Skip HTML tags
+            
+        t = tokens[i]
+        t = _MD_BOLD1.sub(r'<b>\1</b>', t)
+        t = _MD_BOLD2.sub(r'\1<b>\2</b>\3', t)
+        t = _MD_STRIKE1.sub(r'<s>\1</s>', t)
+        t = _MD_STRIKE2.sub(r'<s>\1</s>', t)
+        tokens[i] = t
+        
+    text = "".join(tokens)
+    
+    # Normalize spacing to improve readability
     text = re.sub(r'(?:<br\s*/?>|\n|\r)+', '<br><br>', text, flags=re.IGNORECASE)
     text = re.sub(r'^(?:<br\s*/?>)+', '', text, flags=re.IGNORECASE)
     text = re.sub(r'(?:<br\s*/?>)+$', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</div>\s*<div>', '</div><br><br><div>', text, flags=re.IGNORECASE)
+    
+    # --- 5. Restore Protected Code Spans ---
+    for i, span_html in enumerate(code_spans):
+        text = text.replace(f"__CODE_SPAN_{i}__", span_html)
     
     return text
 
@@ -118,14 +162,16 @@ class PreviewDialog(QDialog):
         self.text = QTextEdit(self)
         self.text.setReadOnly(True)
         
-        html = []
+        html_out = []
         for name, old, new in zip(field_names, old_fields, new_fields):
             if old != new:
-                html.append(f"<h3>Field: {name}</h3>")
-                html.append(f"<b>Before:</b><br><div style='background-color: #ffe6e6; padding: 5px; color: black;'>{old}</div>")
-                html.append(f"<b>After:</b><br><div style='background-color: #e6ffe6; padding: 5px; color: black;'>{new}</div><hr>")
+                safe_old = html.escape(old)
+                safe_new = html.escape(new)
+                html_out.append(f"<h3>Field: {name}</h3>")
+                html_out.append(f"<b>Before:</b><br><pre style='background-color: #ffe6e6; padding: 5px; color: black; white-space: pre-wrap;'>{safe_old}</pre>")
+                html_out.append(f"<b>After:</b><br><pre style='background-color: #e6ffe6; padding: 5px; color: black; white-space: pre-wrap;'>{safe_new}</pre><hr>")
                 
-        self.text.setHtml("".join(html))
+        self.text.setHtml("".join(html_out))
         layout.addWidget(self.text)
         
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
