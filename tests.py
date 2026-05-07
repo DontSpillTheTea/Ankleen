@@ -34,15 +34,28 @@ _CODE_SUFFIX = "_\uE001"
 def _code_token(i):
     return f"{_CODE_PREFIX}{i}{_CODE_SUFFIX}"
 
+def _repair_code_span_artifacts(code):
+    code = re.sub(r'(&lt;([A-Za-z_][A-Za-z0-9_:,. -]*)&gt;)<\2>', r'\1', code)
+    code = re.sub(r'(&lt;/([A-Za-z_][A-Za-z0-9_:,. -]*)&gt;)</\2>', r'\1', code)
+    return code
+
+_UNKNOWN_TAG_ORPHAN_RE = re.compile(
+    r"</(?!(?:" + "|".join(SAFE_TAGS) + r")(?=>))[A-Za-z_][A-Za-z0-9_:.-]*>"
+)
+_CODE_SPAN_RE = re.compile(r"`([^`\n]+?)`")
+
 def _protect_code_spans(text):
     code_spans = []
     def repl(m):
-        raw = html.unescape(m.group(1))
+        code = m.group(1)
+        code = _repair_code_span_artifacts(code)
+        raw = html.unescape(code)
         esc = html.escape(raw, quote=False)
         tok = _code_token(len(code_spans))
         code_spans.append(f"<code>{esc}</code>")
         return tok
-    protected = re.sub(r"`([^`\n]+?)`", repl, text)
+    protected = _CODE_SPAN_RE.sub(repl, text)
+    protected = _UNKNOWN_TAG_ORPHAN_RE.sub("", protected)
     return protected, code_spans
 
 def _restore_code_spans(text, code_spans):
@@ -218,6 +231,22 @@ cases = [
         "C++: already wrapped in <code> is untouched",
         "Already <code>static_cast&lt;double&gt;(count)</code>.",
         "Already <code>static_cast&lt;double&gt;(count)</code>.",
+    ),
+    # --- Browser HTML artifact tests ---
+    (
+        "browser artifact: duplicated fake tag inside code span",
+        "<b>Fix:</b> Cast one to double: `static_cast&lt;double&gt;<double>(count) / total`.</double>",
+        "<b>Fix:</b> Cast one to double: <code>static_cast&lt;double&gt;(count) / total</code>.",
+    ),
+    (
+        "browser artifact: vector<int> orphan tag",
+        "Use `vector&lt;int&gt;<int>`.</int>",
+        "Use <code>vector&lt;int&gt;</code>.",
+    ),
+    (
+        "browser artifact: std::map with orphan tag (space in type name prevents dedup, orphan still stripped)",
+        "Use `std::map&lt;string, int&gt;<string>(x)`.</string>",
+        "Use <code>std::map&lt;string, int&gt;&lt;string&gt;(x)</code>.",
     ),
 ]
 

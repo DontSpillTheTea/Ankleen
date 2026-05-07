@@ -94,19 +94,67 @@ def _code_token(index: int) -> str:
     return f"{_CODE_PREFIX}{index}{_CODE_SUFFIX}"
 
 
+def _repair_code_span_artifacts(code: str) -> str:
+    """Remove browser-duplicated fake HTML tags that appear after escaped literals.
+
+    When a user imports/types  `static_cast&lt;double&gt;(x)`  the browser may
+    parse <double> as a real tag and insert it into the source, giving:
+        static_cast&lt;double&gt;<double>(x)
+    We detect the pattern  &lt;TAG&gt;<TAG>  and collapse it to just &lt;TAG&gt;.
+    Handles both opening and closing template-style duplicates.
+    """
+    # &lt;Tag&gt;<Tag>  →  &lt;Tag&gt;
+    code = re.sub(
+        r'(&lt;([A-Za-z_][A-Za-z0-9_:,. -]*)&gt;)<\2>',
+        r'\1',
+        code,
+    )
+    # &lt;/Tag&gt;</Tag>  →  &lt;/Tag&gt;
+    code = re.sub(
+        r'(&lt;/([A-Za-z_][A-Za-z0-9_:,. -]*)&gt;)</\2>',
+        r'\1',
+        code,
+    )
+    return code
+
+
+# Matches `...` and greedily consumes any orphan closing tags for UNKNOWN tags
+# immediately after the closing backtick. Safe tags like </div> are NOT consumed.
+_UNKNOWN_TAG_ORPHAN_RE = re.compile(
+    r"</(?!(?:" + "|".join(SAFE_TAGS) + r")(?=>))[A-Za-z_][A-Za-z0-9_:.-]*>"
+)
+_CODE_SPAN_RE = re.compile(
+    r"`([^`\n]+?)`"
+)
+
+
 def _protect_code_spans(text: str) -> tuple[str, list[str]]:
-    """Replace all `...` spans with sentinel tokens. Content is HTML-escaped idempotently."""
+    """Replace all `...` spans with sentinel tokens. Content is HTML-escaped idempotently.
+
+    Also repairs browser artifact patterns:
+    - Duplicated fake tags inside the code span  (e.g. &lt;T&gt;<T>)
+    - Orphan closing tags immediately after the closing backtick  (e.g. `code`</T>)
+    """
     code_spans: list[str] = []
 
     def repl(m):
-        # unescape first so we never double-escape existing &lt; etc.
-        raw = html.unescape(m.group(1))
+        code = m.group(1)
+        # Remove browser-injected duplicate tag artifacts from inside the code span
+        code = _repair_code_span_artifacts(code)
+        # Orphan closing tags after the backtick are simply dropped (they are
+        # artifacts — valid inline code is never followed by a raw closing tag)
+        raw = html.unescape(code)
         escaped = html.escape(raw, quote=False)
         tok = _code_token(len(code_spans))
         code_spans.append(f"<code>{escaped}</code>")
         return tok
 
-    protected = re.sub(r"`([^`\n]+?)`", repl, text)
+    def repl_with_orphan_cleanup(m_text):
+        # After extracting code spans, strip lingering unknown closing tags
+        return _UNKNOWN_TAG_ORPHAN_RE.sub("", m_text)
+
+    protected = _CODE_SPAN_RE.sub(repl, text)
+    protected = _UNKNOWN_TAG_ORPHAN_RE.sub("", protected)
     return protected, code_spans
 
 
