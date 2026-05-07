@@ -88,7 +88,8 @@ def fix_formatting(html_field: str) -> str:
     text = _MD_STRIKE2.sub(r'<s>\1</s>', text)
     
     # Normalize spacing to improve readability (prevent clumping)
-    text = re.sub(r'(?:<br\s*/?>)+', '<br><br>', text, flags=re.IGNORECASE)
+    # Matches any sequence of HTML <br> tags OR literal unshown newlines (\n, \r)
+    text = re.sub(r'(?:<br\s*/?>|\n|\r)+', '<br><br>', text, flags=re.IGNORECASE)
     text = re.sub(r'^(?:<br\s*/?>)+', '', text, flags=re.IGNORECASE)
     text = re.sub(r'(?:<br\s*/?>)+$', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</div>\s*<div>', '</div><br><br><div>', text, flags=re.IGNORECASE)
