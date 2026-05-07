@@ -14,7 +14,7 @@ from aqt.utils import tooltip
 from aqt.qt import (
     QDialog, QVBoxLayout, QDialogButtonBox,
     QTabWidget, QTextBrowser, QPlainTextEdit,
-    QPalette,
+    QColor, QPalette,
 )
 
 
@@ -163,36 +163,59 @@ def _get_note_key(note):
     return note.id if note.id else id(note)
 
 
-def _preview_colors(widget):
-    """Extract theme-aware CSS colors from the current Qt palette."""
+def _blend(c1: QColor, c2: QColor, amount: float) -> QColor:
+    """Linear blend: amount=0 returns c1, amount=1 returns c2."""
+    amount = max(0.0, min(1.0, amount))
+    r = round(c1.red()   * (1 - amount) + c2.red()   * amount)
+    g = round(c1.green() * (1 - amount) + c2.green() * amount)
+    b = round(c1.blue()  * (1 - amount) + c2.blue()  * amount)
+    return QColor(r, g, b)
+
+
+def _is_dark(c: QColor) -> bool:
+    """Perceived brightness check."""
+    return (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) < 128
+
+
+def _preview_colors(widget) -> dict:
+    """Return theme-aware CSS color strings, including subtle red/green tints."""
     pal = widget.palette()
+    base   = pal.color(QPalette.ColorRole.Base)
+    text   = pal.color(QPalette.ColorRole.Text)
+    window = pal.color(QPalette.ColorRole.Window)
+    border = pal.color(QPalette.ColorRole.Mid)
+
+    dark = _is_dark(base)
+    tint  = 0.18 if dark else 0.08   # more lift needed in dark mode
+
+    before_bg     = _blend(base,   QColor(180, 60,  60),  tint)
+    after_bg      = _blend(base,   QColor(60,  150, 80),  tint)
+    before_border = _blend(border, QColor(220, 80,  80),  0.35)
+    after_border  = _blend(border, QColor(80,  190, 110), 0.35)
+
     return {
-        "bg":     pal.color(QPalette.ColorRole.Base).name(),
-        "alt_bg": pal.color(QPalette.ColorRole.AlternateBase).name(),
-        "text":   pal.color(QPalette.ColorRole.Text).name(),
-        "border": pal.color(QPalette.ColorRole.Mid).name(),
-        "window": pal.color(QPalette.ColorRole.Window).name(),
+        "window":        window.name(),
+        "text":          text.name(),
+        "border":        border.name(),
+        "before_bg":     before_bg.name(),
+        "after_bg":      after_bg.name(),
+        "before_border": before_border.name(),
+        "after_border":  after_border.name(),
     }
 
 
 def _build_rendered_html(old_fields, new_fields, field_names, colors):
     """Build readable before/after HTML for the Rendered Preview tab."""
-    bg     = colors["bg"]
-    alt_bg = colors["alt_bg"]
-    text   = colors["text"]
-    border = colors["border"]
-    window = colors["window"]
-
-    box_base = (
-        f"color:{text}; border:1px solid {border}; border-radius:4px;"
-        f"padding:8px; margin-bottom:6px;"
-    )
+    c = colors  # shorthand
     head = (
         f"<html><head><style>"
-        f"body {{ background:{window}; color:{text}; font-family:sans-serif; }}"
-        f".before {{ {box_base} background:{bg}; border-left:4px solid {border}; }}"
-        f".after  {{ {box_base} background:{alt_bg}; border-left:4px solid {text}; }}"
-        f".label  {{ color:{text}; font-weight:bold; margin:4px 0 2px; }}"
+        f"body {{ background:{c['window']}; color:{c['text']}; font-family:sans-serif; margin:8px; }}"
+        f".box {{ border-radius:6px; padding:8px; margin-bottom:6px; color:{c['text']}; }}"
+        f".before {{ background:{c['before_bg']}; border:1px solid {c['before_border']}; border-left:4px solid {c['before_border']}; }}"
+        f".after  {{ background:{c['after_bg']};  border:1px solid {c['after_border']};  border-left:4px solid {c['after_border']};  }}"
+        f".label  {{ font-weight:bold; margin:6px 0 2px; color:{c['text']}; }}"
+        f"h3 {{ color:{c['text']}; margin-bottom:2px; }}"
+        f"hr {{ border-color:{c['border']}; }}"
         f"</style></head><body>"
     )
 
@@ -201,11 +224,11 @@ def _build_rendered_html(old_fields, new_fields, field_names, colors):
         if old == new:
             continue
         safe_name = html.escape(name)
-        parts.append(f"<h3 style='color:{text};margin-bottom:2px'>{safe_name}</h3>")
+        parts.append(f"<h3>{safe_name}</h3>")
         parts.append(f"<p class='label'>Before</p>")
-        parts.append(f"<div class='before'>{old}</div>")
+        parts.append(f"<div class='box before'>{old}</div>")
         parts.append(f"<p class='label'>After</p>")
-        parts.append(f"<div class='after'>{new}</div>")
+        parts.append(f"<div class='box after'>{new}</div>")
         parts.append("<hr>")
     parts.append("</body></html>")
     return "".join(parts)
